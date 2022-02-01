@@ -1,0 +1,103 @@
+---
+title: "Model"
+author: "Alex Eisert"
+date: "1/8/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(keras)
+library(dplyr)
+```
+
+```{r}
+## Ellman examples; tried to predict next element in sequence; I'm trying to predict the same element each time (the last element)
+
+## Change pos_y to plate crossing
+
+data <- pitches
+
+NumPitches <- 1 ## Number of pitches in the batch
+TSperPitch <- 40 ## Number of timesteps to save from the current pitch
+InputLength <- 3 ## Number of variables in the input
+
+## y should have three dimensions, but they should be x pos, y post, and t, t being time the pitch crosses the plate
+
+x <- array(0, dim = c(NumPitches, TSperPitch, InputLength))
+y <- array(0, dim = c(NumPitches, TSperPitch, InputLength))
+
+encode <- function(data, x){
+  for (i in 1:InputLength){
+    x[,,i] <- data[,i][1:TSperPitch]
+  }
+  return(x)
+}
+
+encode.y <- function(data, y){
+  for (i in 1:InputLength){
+    y[,,i] <- data[,i][nrow(data)]
+  }
+  return(y)
+}
+
+x
+x <- encode(data, x)
+y <- encode.y(data, y)
+
+model <- keras_model_sequential()
+
+model %>%
+  layer_simple_rnn(units = 20, return_sequences = TRUE, input_shape=c(TSperPitch,InputLength)) %>%
+  layer_dense(units = InputLength)
+
+model %>% compile(
+  loss = "mean_squared_error",
+  optimizer = optimizer_nadam()
+)
+
+summary(model)
+
+model %>% fit(
+  pitches,
+  pitches.y,
+  epochs = 200
+)
+
+new_obs <- encode((First %>% select(pos_x, pos_y, pos_z)), x)
+result <- predict(model, new_obs)
+
+new_obs
+result
+nrow(First)
+First[49,]
+
+## Does it make sense to have both training and validation when there is not independence among the observations? Validation will be more dependent on training than testing will be because validation will come right after testing
+
+## Still confused about what "lookback" means. Also, would I even need to use "step"? Because I want to use every observation and not skip any... and how would I use delay? Because each pitch will have a different number of timesteps since it takes a different amount of time for each pitch to reach homeplate
+
+## Can't have different input lengths in the same batch; if you want to take advantage of batch-processing, you would have to use pitches that have the same number of observations; but we don't have to work like that, and can treat each pitch as its own batch (slower, but simpler to set up; batches are really mostly to speed up processing)
+
+## We won't be interested in predicting within ~100ms of the plate; batter has to initiate a swing by x point anyways; could truncate each pitch based on this idea
+
+## For every pitch, we just want to use the whole pitch; no lookback or dividing into train/test/validation within each pitch... until we validate/test the model, where we'll do it on a portion of a new pitch
+
+## Fit instead of "fit_generator"; training data instead of train_gen
+
+## Batch is number of pitches it goes through at a time (learning algorithm computes weight adjustment as an average learning of all pitches in the batch; helps smooth out learning curve so anomalous pitches would have less of an impact... really doesn't matter the size of the batch as long as you train things enough, i.e., increase epochs? Mostly though it seems batch is for speeding things up); epochs is number of times it goes through all of the pitches
+
+## Three axes in this array: number of pitches, length of pitches (timesteps), amount of variables per timestep (x_pos, y_pos, etc.)
+## x array is input, y array is output (i.e., length of output)
+
+## Three axes in output array: 1, 1, 3 (x pos, y pos, and time it crosses the plate)
+
+## "batch normalization"
+ 
+## addition_rnn
+
+## Should we just feed x pos y pos z pos into the network and nothing else? Make at least one version like this? Should be able to infer acceleration from this
+
+## Is it okay to feed a constant at all timesteps? Strategic info like balls & strikes? Probably fine; let's check it out
+```
+

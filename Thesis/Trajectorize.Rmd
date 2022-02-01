@@ -1,0 +1,227 @@
+---
+title: "Trajectorize"
+author: "Alex Eisert"
+date: "9/9/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(baseballr)
+library(tidyverse)
+library(plotly)
+library(tidyverse)
+```
+
+```{r}
+annual_statcast_query <- function(season) {
+  
+  data_base_column_types <- read_csv("https://app.box.com/shared/static/q326nuker938n2nduy81au67s2pf9a3j.csv")
+  
+  dates <- seq.Date(as.Date(paste0(season, '-03-01')),
+                    as.Date(paste0(season, '-12-01')), by = '4 days')
+  
+  date_grid <- tibble::tibble(start_date = dates, 
+                              end_date = dates + 3)
+  
+  safe_savant <- purrr::safely(scrape_statcast_savant)
+  
+  payload <- purrr::map(.x = seq_along(date_grid$start_date), 
+                       ~{message(paste0('\nScraping week of ', date_grid$start_date[.x], '...\n'))
+                         
+                         payload <- safe_savant(start_date = date_grid$start_date[.x], 
+                                                end_date = date_grid$end_date[.x], type = 'pitcher')
+                         
+                         return(payload)
+                       })
+  
+  payload_df <- purrr::map(payload, 'result')
+  
+  number_rows <- purrr::map_df(.x = seq_along(payload_df), 
+                               ~{number_rows <- tibble::tibble(week = .x, 
+                                                               number_rows = length(payload_df[[.x]]$game_date))}) %>%
+    dplyr::filter(number_rows > 0) %>%
+    dplyr::pull(week)
+  
+  payload_df_reduced <- payload_df[number_rows]
+  
+  payload_df_reduced_formatted <- purrr::map(.x = seq_along(payload_df_reduced), 
+                                             ~{cols_to_transform <- c("fielder_2", "pitcher_1", "fielder_2_1", "fielder_3",
+                                                                      "fielder_4", "fielder_5", "fielder_6", "fielder_7",
+                                                                      "fielder_8", "fielder_9")
+                                             
+                                             df <- purrr::pluck(payload_df_reduced, .x) %>%
+                                               dplyr::mutate_at(.vars = cols_to_transform, as.numeric) %>%
+                                               dplyr::mutate_at(.vars = cols_to_transform, function(x) {
+                                                 ifelse(is.na(x), 999999999, x)
+                                               })
+                                             
+                                             character_columns <- data_base_column_types %>%
+                                               dplyr::filter(class == "character") %>%
+                                               dplyr::pull(variable)
+                                             
+                                             numeric_columns <- data_base_column_types %>%
+                                               dplyr::filter(class == "numeric") %>%
+                                               dplyr::pull(variable)
+                                             
+                                             integer_columns <- data_base_column_types %>%
+                                               dplyr::filter(class == "integer") %>%
+                                               dplyr::pull(variable)
+                                             
+                                             df <- df %>%
+                                               dplyr::mutate_if(names(df) %in% character_columns, as.character) %>%
+                                               dplyr::mutate_if(names(df) %in% numeric_columns, as.numeric) %>%
+                                               dplyr::mutate_if(names(df) %in% integer_columns, as.integer)
+                                             
+                                             return(df)
+                                             })
+  
+  combined <- payload_df_reduced_formatted %>%
+    dplyr::bind_rows()
+  
+  combined
+}
+
+
+format_append_statcast <- function(df) {
+  
+  # function for appending new variables to the data set
+  
+  additional_info <- function(df) {
+    
+    # apply additional coding for custom variables
+    
+    df$hit_type <- with(df, ifelse(type == "X" & events == "single", 1,
+                                   ifelse(type == "X" & events == "double", 2,
+                                          ifelse(type == "X" & events == "triple", 3, 
+                                                 ifelse(type == "X" & events == "home_run", 4, NA)))))
+    
+    df$hit <- with(df, ifelse(type == "X" & events == "single", 1,
+                              ifelse(type == "X" & events == "double", 1,
+                                     ifelse(type == "X" & events == "triple", 1, 
+                                            ifelse(type == "X" & events == "home_run", 1, NA)))))
+    
+    df$fielding_team <- with(df, ifelse(inning_topbot == "Bot", away_team, home_team))
+    
+    df$batting_team <- with(df, ifelse(inning_topbot == "Bot", home_team, away_team))
+    
+    df <- df %>%
+      dplyr::mutate(barrel = ifelse(launch_angle <= 50 & launch_speed >= 98 & launch_speed * 1.5 - launch_angle >= 117 & launch_speed + launch_angle >= 124, 1, 0))
+    
+    df <- df %>%
+      dplyr::mutate(spray_angle = round(
+        (atan(
+          (hc_x-125.42)/(198.27-hc_y)
+        )*180/pi*.75)
+        ,1)
+      )
+    
+    df <- df %>%
+      dplyr::filter(!is.na(game_year))
+    
+    return(df)
+  }
+  
+  df <- df %>%
+    additional_info()
+  
+  df$game_date <- as.character(df$game_date)
+  
+  df <- df %>%
+    dplyr::arrange(game_date)
+  
+  df <- df %>%
+    dplyr::filter(!is.na(game_date))
+  
+  df <- df %>%
+    dplyr::ungroup()
+  
+  df <- df %>%
+    dplyr::select(setdiff(names(.), c("error")))
+  
+  return(df)
+}
+
+d <- annual_statcast_query(2019)
+```
+
+```{r}
+d.subset <- d %>% filter(game_type=="R" & !is.na(vx0) & !is.na(vy0) & !is.na(vz0) & !is.na(ax) & !is.na(ay) & !is.na(az) & !is.na(release_pos_x) & !is.na(release_pos_y) & !is.na(release_pos_z)) %>% select(game_date, batter, pitcher, p_throws, pitch_type, release_pos_x, release_pos_y, release_pos_z, vx0, vy0, vz0, ax, ay, az, spin_axis, release_spin_rate, zone, balls, strikes, on_3b, on_2b, on_1b, outs_when_up, pitch_number, home_score, away_score, inning, inning_topbot, home_team, away_team, des)
+
+first.try <- d.subset[2,]
+
+trajectorize <- function(data) {
+  
+  vx <- vector(mode = "numeric")
+  vy <- vector(mode = "numeric")
+  vz <- vector(mode = "numeric")
+  pos_x <- vector(mode = "numeric")
+  pos_y <- vector(mode = "numeric")
+  pos_z <- vector(mode = "numeric")
+  t <- 0
+  
+  vx[1] <- data$vx0
+  vy[1] <- data$vy0
+  vz[1] <- data$vz0
+  pos_x[1] <- data$release_pos_x
+  pos_y[1] <- data$release_pos_y
+  pos_z[1] <- data$release_pos_z
+
+## Note: initial velocity is determined 50 feet from the back tip of home plate (https://www.mlb.com/glossary/statcast/velocity)
+## Timesteps every 10 ms; approximates reasonable assessment of the visual system. Truncating should give about 30 ms for every pitch
+## Velocity and acceleration given in feet per second
+## Release given in feet from back tip of home plate
+
+while (pos_y[length(pos_y)] > -60.5){
+  t <- t + 0.01
+  vx <- c(vx, data$vx0 + data$ax*t)
+  pos_x <- c(pos_x, data$release_pos_x + data$vx0*t + (1/2)*data$ax*t^2)
+  vy <- c(vy, data$vy0 + data$ay*t)
+  pos_y <- c(pos_y, data$release_pos_y + data$vy0*t + (1/2)*data$ay*t^2)
+  vz <- c(vz, data$vz0 + data$az*t)
+  pos_z <- c(pos_z, data$release_pos_z + data$vz0*t + (1/2)*data$az*t^2)
+}
+  
+  df <- data.frame(matrix(ncol=0, nrow=length(vx)))
+  df$vx <- vx
+  df$pos_x <- pos_x
+  df$vy <- vy
+  df$pos_y <- pos_y
+  df$vz <- vz
+  df$pos_z <- pos_z
+  
+  return(df)
+}
+
+x <- trajectorize(first.try)
+
+plot(-x$pos_y, x$pos_z)
+
+d[1000:1010,]
+
+plot_ly(x=-(x$pos_y), y=x$pos_x, z=x$pos_z, type="scatter3d", mode="markers")
+d.subset[1,]
+d.subset %>% filter(game_date=="2019-03-28" & batter==607043)
+which(d.subset$release_speed < 70)
+d.subset[1,]
+first.try
+x
+pitches <- array(0, dim = c(1000, 40, 3))
+pitches.y <- array(0, dim = c(1000, 40, 3))
+
+for (i in 1:1000){
+  x <- trajectorize(d.subset[i,])
+  x <- x %>% select(pos_x, pos_y, pos_z)
+  pitches[,,1][i,] <- x$pos_x[1:40]
+  pitches[,,2][i,] <- x$pos_y[1:40]
+  pitches[,,3][i,] <- x$pos_z[1:40]
+  pitches.y[,,1][i,] <- x$pos_x[nrow(x)]
+  pitches.y[,,2][i,] <- nrow(x)
+  pitches.y[,,3][i,] <- x$pos_z[nrow(x)]
+}
+pitches.y
+First <- trajectorize(d.subset[1001,])
+First
+```
+
